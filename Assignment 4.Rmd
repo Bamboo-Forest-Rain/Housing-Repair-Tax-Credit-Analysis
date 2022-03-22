@@ -1,0 +1,657 @@
+---
+title: "HCD Housing Repair Tax Credit Analysis"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+author: "Yihong Hu"
+date: "10/30/2021"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+# Introduction
+
+This analysis is dedicated to Housing and Community Development (HCD) to maximize the the number of eligible homeowners to take repair tax credit with limited allocation resources. This tax credit program has been launched for 20 years, yet it has been taken by only 11% of the eligible homeowners. HCD is now launching a proactive outreach campaign to homeowners. The goal is to develop a model that can predict the turn out of eligible homeowners with certain character traits after being reached by this new campaign. The main idea is for this model to correctly predict homeowners who take the credit after being reached by the campaign so that the allocation resource is not wasted; in other words, the idea is to develop a model with high sensitivity.
+
+This analysis shows that the model developed is not very reliable to put into production due to challenges to improve the sensitivity. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results = FALSE, warning = FALSE, cache = FALSE)
+options(scipen=10000000)
+
+library(tidyverse)
+library(caret)
+library(knitr) 
+library(pscl)
+library(plotROC)
+library(pROC)
+library(scales)
+library(stargazer)
+library(gridExtra) 
+library(kableExtra)
+library(ggplot2)
+
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#981FAC","#CB0F8B","#FF006A","#FE4C35","#FE9900")
+palette4 <- c("#981FAC","#FF006A","#FE4C35","#FE9900")
+palette2 <- c("#981FAC","#FF006A")
+
+
+housing <- read.csv("E:/UPenn/Fall 2021/CPLN 592 MUSA 508/LAB 6 WEEK 8/Assignment 4/Public-Policy-Analytics-Landing/DATA/Chapter6/housingSubsidy.csv")
+```
+
+# Feature Engineering: Previous Client Data
+
+The analysis is based on the data of previous campaign attenders. In general, the number of homeowners who did not take the credit is much higher than those who did.
+
+## Examine continuous data
+
+Fig 1 displays bar graphs for the mean of the continuous variables associated with the number of turn outs at the previous campaign. Fig 2. shows the distribution of previous campaign attender over the variable data, separated by the turn out results. 
+
+Fig.1 indicates that age, annual home repair spending, consumer price index, consumer confidence index do not have much difference between the homeowners who are on and off the credits. When the inflation rate is high, homeowner seems to be less willing to take on the credit. As expected, the more the previous contacts, the higher the chance the homeowners would take the credit.
+
+```{r Continous data exploration bar ,warning = FALSE, fig.height=7,fig.width = 9 }
+Var_name <- c("Age","Previous Number\n of Contacts","Annual Home Repair Spending")
+
+housing %>%
+  dplyr::select(y,"Age" = age, "Number of Previous\n Contacts" = previous, "Annual Home Repair\n Spending" = spent_on_repairs, "Unemployment Rate" = unemploy_rate, "Consumer Price\n Index at Campaign" = cons.price.idx, "Number of Contacts\n for This Campaign" = campaign, "Inflation Rate" = inflation_rate, "Consumer\n Confidence Index" = cons.conf.idx) %>%
+  gather(Variable, value, -y) %>%
+    ggplot(aes(y, value, fill=y)) + 
+      geom_bar(position = "dodge", stat = "summary", fun = "mean") + 
+      facet_wrap(~Variable, scales = "free") +
+      scale_fill_manual(values = palette2, name = "Credit Status") +
+      labs(x="Credit Status", y="Value", 
+           title = "Feature associations with the likelihood of taking tax credit",
+           subtitle = "(continous outcomes)", caption = "Fig.1") +
+      theme(legend.position = "none")+
+  plotTheme()
+```
+
+Fig.2 dissects the data to look at the distribution. Still, age does not matter much to the outcome. We could see that most homeowners are fairly young around 30 years old. Inflation rate shows a nice pattern: when it is low, more people take the credit; when it is high, it discourages people to take the credit. Interestingly, most people who spent more on home repair do not take the credit. Consumer confidence index, though similar in Fig.1 between those who are on and off the credit, shows a great variation in Fig.2. This demonstrates that this variable might still be significant despite the mean of the variable between "on-credit" and "off-credit" is close.
+
+There is a 50/50 chance for the homeowners to take credit when they were been contacted once or twice before the campaign; after the fourth contacts, no body turned down the credit. However, only 4 people who actually had more than 4 contacts in the data set, therefore this might not be a significant indicator.
+
+On the other hand, the if a person is contacted more than 10 times for this campaign, than the chance of him or her taking the credit is very high. This is a strong indicator to determine the outcome. 
+
+Unemployment rate shows negative and positive numbers, which does not make sense. This could just be an recording error.
+
+```{r Continuous data exploration distribution}
+housing %>%
+    dplyr::select(y,"Age" = age, "Number of Previous\n Contacts" = previous, "Annual Home Repair\n Spending" = spent_on_repairs, "Unemployment Rate" = unemploy_rate, "Consumer Price\n Index at Campaign" = cons.price.idx, "Number of Contacts\n for This Campaign" = campaign, "Inflation Rate" = inflation_rate, "Consumer\n Confidence Index" = cons.conf.idx) %>%
+    gather(Variable, value, -y) %>%
+    ggplot() + 
+    geom_density(aes(value, color=y), fill = "transparent") + 
+    facet_wrap(~Variable, scales = "free") +
+    scale_fill_manual(values = palette2, name= "Credit Status") +
+    labs(title = "Feature distributions on credit vs. not on credit",
+         subtitle = "(continous outcomes)")+
+  theme(panel.background = element_rect(colour = "black"))
+```
+
+## Examine catagorical data
+
+Fig 3. plots the categorical variables and their associations with the likelihood of taking tax credit. Homeowners who are been reached in December, March, October, and September tend to be more willing to take the credit. Homeowners who signed up in the last campaign is more likely to sigh up for the next one. In addition the optimum call-back period is between "5-10" and "18 - 21" days: if homeowners are contacted again within these days, the are more likely to sign up for credits. People are more willing to take the credit if they are contacted by cell rather than telephone.
+
+Other variables seem to not generate too much variation in the proportion between homeowners who are either on or off the credit. 
+
+```{r Multiple catagory, fig.width = 9, fig.height= 7}
+housing %>%
+    dplyr::select(y, "Occupation" = job, "Day of Week" = day_of_week, "Maritial Status" = marital, "Educational Attainment" = education, "Contact Month" = month, "Presence of Lien" = taxLien,"Status of Mortgage" = mortgage, "Full time Residency\n in Philly" = taxbill_in_phl, "Outcome of\n Previous Campaign" = poutcome, "Days after Last Campaign" = pdays, "Contact Type" = contact) %>%
+    gather(Variable, value, -y) %>%
+    count(Variable, value, y) %>%
+      ggplot(., aes(value, n, fill = y)) +   
+        geom_bar(position = "fill", stat="identity") +
+        facet_wrap(~Variable, scales="free") +
+        scale_fill_manual(values = palette2, name = "Credit Status") +
+        labs(x=" ", y="Value",
+             title = "Feature associations with the likelihood of talking tax credit",
+             subtitle = "Categorical features", cpation = "Fig 3") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+              panel.background = element_rect(colour = "black"))
+```
+
+## Kitchen-sink Model
+
+This model includes all variables regardless of their significance. We will identify some non-significant variables to be excluded in the later model. 
+
+First, we will split the data into train and test data by 65/35 ratio.
+
+```{r split data}
+#Split Data into Train and Test Sets
+set.seed(3456)
+trainIndex <- createDataPartition(
+                                  y = paste(housing$taxLien,housing$education),
+                                  housing$y, p = .65,
+                                  list = FALSE,
+                                  times = 1)
+housingTrain <- housing[ trainIndex,]
+housingTest  <- housing[-trainIndex,]
+```
+
+
+```{r Summary Regression Kitchen Sink, result = TRUE, echo = TRUE}
+
+#Build Kitchensink regression
+housingModel_Ksink <- glm(y_numeric ~ .,
+                  data=housingTrain %>% select(-y),
+                  family ="binomial" (link="logit")) 
+  
+```
+
+We can see most variables are not very significant. Based on the data examination and regression summary, we now can remove some non-significant variables and engineer some new features that may increase the significance of the model. 
+
+# New Feature Engineering
+
+As we examine the data above, we could see that there are some significant indicators embedded in continuous and categorical data that cause variations in outcome. These indicators should be grouped together to improve the significance of the model. 
+
+New features include: 
+
+1. "Month_group" - separated into 3 tiers with the first tier the highest number of people who took the credit when contacted during these months
+
+2. "pdays_group" - separated into 4 tiers with the first tier having the highest number of people who took the credit when contacted these many days after the previous campiagn.
+
+3. "job_group" - separated into 2 tiers with the first tier having the highest number of people who took the credit in these occupations.
+
+4. "peutcome_group" - separated into 2 categories based on the result from the previous campaign. If the person signed up successfully in the previous campaign, he or she belongs to the "success" catagory; else "other".
+
+5. "campiagn_group" - separated into 2 tiers depending on the times of people being contacted for this campaign. People who were contacted more than 10 times will be put into "high_contact" group
+
+```{r Variable Transformation}
+#Variable Transfomration
+housing2 <- 
+  housing %>% 
+  mutate(Month_group = case_when(month == "dec" ~ "Month_g1",
+                                 month == "mar" ~ "Month_g1",
+                                 month == "oct" ~ "Month_g2",
+                                 month == "sep" ~ "Month_g2",
+                                 month != c("dec","mar","oct","sep") ~ "Month_g3"))
+
+housing2 <- 
+  housing2 %>% 
+  mutate(pdays_group = case_when(pdays	==	"0"	~	"pdays_tier_1",
+                                pdays	==	"19"	~	"pdays_tier_1"	,
+                                pdays	==	"21"	~	"pdays_tier_1"	,
+                                pdays	==	"5"	~	"pdays_tier_1"	,
+                                pdays	==	"7"	~	"pdays_tier_1"	,
+                                pdays	==	"10"	~	"pdays_tier_1",
+                                pdays	==	"3"	~	"pdays_tier_1"	,
+                                pdays	==	"12"	~	"pdays_tier_2"	,
+                                pdays	==	"15"	~	"pdays_tier_2"	,
+                                pdays	==	"18"	~	"pdays_tier_2"	,
+                                pdays	==	"6"	~	"pdays_tier_2"	,
+                                pdays	==	"2"	~	"pdays_tier_3"	,
+                                pdays	==	"4"	~	"pdays_tier_3"	,
+                                pdays	==	"9"	~	"pdays_tier_3"	,
+                                pdays	==	"999"	~	"pdays_tier_3"	,
+                                pdays	==	"1"	~	"pdays_tier_4",
+                                pdays	==	"11"	~	"pdays_tier_4"	,
+                                pdays	==	"13"	~	"pdays_tier_4"	,
+                                pdays	==	"16"	~	"pdays_tier_4"	,
+                                pdays	==	"14"	~	"pdays_tier_4"	,
+                                pdays	==	"17"	~	"pdays_tier_4"	))
+                                 
+                                
+housing2 <- 
+  housing2 %>% 
+   mutate(job_group = case_when(job == "student" | job == "retired" | job == "unemployed" ~ "job_tier_1",
+                                job != c("student","retired","unemployed") ~ "job_tier_2"))
+                              
+housing2 <- 
+  housing2 %>% 
+  mutate(poutcome_group = if_else(poutcome == "success", "success","other"))
+
+housing2 <-
+  housing2 %>%
+  mutate(campaign_group = if_else(campaign > 10, "high_contact","low_contact"))
+
+housing2 <- 
+  housing2 %>% 
+   mutate(University = if_else(education == "university.degree", "yes","no"))
+```
+
+# Pre- and Post-cleaned Model Comparison
+
+To test if the new feature will improve the model significance, this section compares the regressions derived between the pre- (kitchen-sink) and post- cleaned data. The summary of the kitchen-sink regression in the previous section shows some non-significant variables. Post-cleaned data will exclude these non-significant variables and add the newly engineered features.
+
+The data is split again for fairness.
+
+```{r split data again for second model, result = 'asis'}
+
+#Split Data again
+
+set.seed(3456)
+trainIndex <- createDataPartition(housing2$y, p = .65,
+                                  list = FALSE,
+                                  times = 1)
+housingTrain2 <- housing2[ trainIndex,]
+housingTest2  <- housing2[-trainIndex,]
+
+housingModel_clean <- glm(y_numeric ~ .,
+                  data=housingTrain2 %>% 
+                    dplyr::select(-spent_on_repairs, -y, -age,                                          -day_of_week, -job, -education, -marital,                                           -mortgage,-contact,-taxLien,unemploy_rate,-taxbill_in_phl,
+                    -month, -pdays,-poutcome,-previous,-campaign),
+                    family="binomial" (link="logit"))
+```
+
+```{r Comparison, results = 'asis', echo= TRUE}
+
+#Table showing variable significance
+
+stargazer(housingModel_Ksink, housingModel_clean,type = 'html', title = "Table 1. Two Housing Regression Models")
+```
+
+
+The cleaned showed a stronger significance, as the p-value for each variable is much smaller.
+
+McFadden R-Squared is accessed on these two models, the higher the number, the better the model is at controlling errors, or the variation of the result. Interestingly, the kitchen-sink model has a higher number of McFadden R-Squared (22% versus 18% of the cleaned model). 
+
+```{r pgr, results = TRUE}
+
+#McFadden R-Squared
+
+pR2(housingModel_Ksink)[4]
+
+pR2(housingModel_clean)[4]
+```
+
+# Cross-validation
+
+This section shows the result of cross-validation for both the kitchen-sink and post-cleaned models. We compare the result using three parameters: ROC, sensitivity, and specificity.  
+
+```{r CrossValidation}
+
+testProbs <- data.frame(Outcome = as.factor(housingTest$y_numeric),
+                        Probs = predict(housingModel_Ksink,
+                                        housingTest,type="response"))
+
+
+testProbs2 <- data.frame(Outcome = as.factor(housingTest2$y_numeric),
+                        Probs = predict(housingModel_clean,
+                                        housingTest2,type="response"))
+
+
+
+head(testProbs)
+
+dis_1 <- ggplot(testProbs, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+  facet_grid(Outcome ~ .) +
+  scale_fill_manual(values = palette2) + xlim(0, 1) +
+  labs(x = "Credit", y = "Density of probabilities",
+       title = "Distribution of predicted probabilities by observed outcome", subtitle = "Kitchen-sink Model") +
+  plotTheme() + theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+
+ dis_2 <- ggplot(testProbs2, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+  facet_grid(Outcome ~ .) +
+  scale_fill_manual(values = palette2) + xlim(0, 1) +
+  labs(x = "Credit", y = "Density of probabilities",
+       title = "", subtitle = "Cleaned Model") +
+  plotTheme() + theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+ 
+ grid.arrange(dis_1,dis_2,nrow=2, bottom = "Fig 4" )
+```
+
+Fig 4 plots the distribution of the predicted outcome. In an ideal situation, we want the prediction result to cluster around “0” if the observed result is "not on tax credit", and the prediction result to cluster around "1" if the observed result is "on tax credit". 
+
+Both models seem to be doing quite well to accurately predict "0" when the observed result is "not on credit", but not very well on predicting "1" when the obeseved result is "on credit". This is related to the sensitivity and specificity that we will examine below. 
+
+## ROC
+
+```{r}
+
+#ROC at 50% Threshold
+
+testProbs <- 
+  testProbs %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs$Probs > 0.5 , 1, 0)))
+
+testProbs2 <- 
+  testProbs2 %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs2$Probs > 0.5 , 1, 0)))
+
+head(testProbs)
+head(testProbs2)
+
+caret::confusionMatrix(testProbs$predOutcome, testProbs$Outcome, 
+                       positive = "1")
+
+caret::confusionMatrix(testProbs2$predOutcome, testProbs2$Outcome, 
+                       positive = "1")
+```
+
+Fig 5. shows the Receiver Operating Characteristic (ROC) Curve of both models to assess the trade-offs. The kitchen-sink model shows less trade-offs. It actually deteriorates slower than the cleaned model indicated by a steeper curve compared to the flat-out curve of the cleaned model at the end. When both models predict correctly at a certain rate, the kitchen-sink model will predict less incorrect results. For example, according to Fig 5, kitchen-sink model predicts incorrectly about 50% of the time when when it predicts correctly 90% of the time, while the cleaned model predicts incorrectly about 75% of the time at the same rate for correct prediction. 
+
+
+```{r, result = TRUE, warning = FALSE}
+
+ROC1 <- ggplot(testProbs, aes(d = as.numeric(testProbs$Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - Kitchensink Housing Model")
+
+ROC2 <-ggplot(testProbs2, aes(d = as.numeric(testProbs2$Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+  labs(title = "ROC Curve - Cleaned Model")
+
+grid.arrange(ROC1, ROC2, ncol=2,bottom = "Fig 5")
+
+```
+
+```{r Area Under the Curve, results= TRUE, warning = FALSE, echo=TRUE, class.source = 'fold-show'}
+#Kitchensink Model
+pROC::auc(testProbs$Outcome, testProbs$Probs)
+
+#Cleaned Model
+pROC::auc(testProbs2$Outcome, testProbs2$Probs)
+```
+
+Area Under the Curve (AUC) provides a quick guideline to check the reliability of the model. Higher the AUC, the better the model is at predicting 0 as 0 and 1 as 1. AUC for kitchen-sink model and cleaned model are fairly close around 80%. This means, both model may distinguish fairly well between homeowners who take the credits and who don't.
+
+## Sensitivity and Specificity
+
+Fig 6. plots the distribution of AUC, sensitivity, and specificity across the 100 folds.
+
+Note that the label is being switched for sensitivity and specificity here due to function set-up. When reading Fig 6 below, please think the plot labelled as “sensitivity” as specificity, and "specificity" as sensitivity. 
+
+```{r K-Folds, warning=FALSE, results = FALSE, echo=FALSE}
+ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+cvFit1 <- train(y ~ ., data = housing %>% 
+                                   dplyr::select(
+                                   -y_numeric), 
+                method="glm", family="binomial",
+                metric="ROC", trControl = ctrl)
+
+cvFit2 <- train(y ~ ., data = housing2 %>% 
+                                   dplyr::select( -spent_on_repairs, -age,                                          -day_of_week, -job, -education, -marital,                                     -mortgage,-contact,-taxLien,unemploy_rate,-taxbill_in_phl,
+                    -month, -pdays,-poutcome,-previous,-campaign, -y_numeric), 
+                method="glm", family="binomial",
+                metric="ROC", trControl = ctrl)
+
+gg_cv1 <- dplyr::select(cvFit1$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(cvFit1$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+    geom_histogram(bins=35, fill = "#FF006A") +
+    facet_wrap(~metric) +
+    geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
+    scale_x_continuous(limits = c(0, 1)) +
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics",
+         subtitle = "Across-fold mean reprented as dotted lines; Kitchen-sink Model") +
+    plotTheme()
+
+gg_cv2 <- dplyr::select(cvFit2$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(cvFit2$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+    geom_histogram(bins=35, fill = "#FF006A") +
+    facet_wrap(~metric) +
+    geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
+    scale_x_continuous(limits = c(0, 1)) +
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics",
+         subtitle = "Across-fold mean reprented as dotted lines; Cleaned Model") +
+    plotTheme()
+
+grid.arrange(gg_cv1,gg_cv2, bottom = "Fig 6")
+```
+
+Ideally, we want the distribution to be normal and tighter to its mean for each parameter, because that would mean the model is more generalizable. Both model's specificity - the capability of a model to predict false as false - is high, and the distribution is very clustered near 1. The specificity--the capability of a model to predict true as true--, on the other hand, is very low, and inconsistent. The ROCs returned by 100-fold for both models are also very spread out, and are relatively similar across both models. The cleaned model, however, shows a slightly higher mean of sensitivity, indicated by the purple line. 
+
+In conclusion, both models can generalize well with respect to specificity, but cannot generalize with respect to ROC and sensitivity. Cleaned model has a slightly higher sensitivity, meaning it slightly better at predicting homeowners who are actually on credit as "on credit". 
+
+# Cost Benefit Analysis 
+
+Here are the scenarios we build for the cost benefit analysis:
+
+True positive: “Predicted correctly homeowner would take the credit; allocated the marketing resources, and 25% took the credit”: -2850 + -5000 + 10000 + 56000 
+
+True negative "Predicted correctly homeowner would not take the credit, no marketing resources were allocated, and no credit was allocated": 0
+
+False positive revenue "Predicted incorrectly homeowner would take the credit; allocated marketing resources; no credit allocated" : 2850
+
+False negative revenue "Predicted that a homeowner would not take the credit but they did: 0 
+
+```{r, results='asis'}
+cost_benefit_table <-
+   testProbs %>%
+      count(predOutcome, Outcome) %>%
+      summarize(True_Negative = sum(n[predOutcome==0 & Outcome==0]),
+                True_Positive = sum(n[predOutcome==1 & Outcome==1]),
+                False_Negative = sum(n[predOutcome==0 & Outcome==1]),
+                False_Positive = sum(n[predOutcome==1 & Outcome==0])) %>%
+       gather(Variable, Count) %>%
+       mutate(Revenue =
+               case_when(Variable == "True_Negative"  ~ 0,
+                         Variable == "True_Positive"  ~ ((-2850 + 5000 + 56000) * (Count *                                                             .25)) + 
+                                                        (-2850 * (Count * .75)),
+                         Variable == "False_Negative" ~ 0 * Count,
+                         Variable == "False_Positive" ~ (-2850) * Count)) %>%
+    bind_cols(data.frame(Description = c(
+              "Predicted correctly homeowner would not take the credit, no marketing resources were allocated, and no credit was allocated",
+              "Predicted correctly homeowner would take the credit; allocated the marketing resources, and 25% took the credit",
+              "Predicted that a homeowner would not take the credit but they did",
+              "Predicted incorrectly homeowner would take the credit; allocated marketing resources; no credit allocated"))) 
+
+kable(cost_benefit_table,
+       caption = "Table 2. Cost/Benefit Table - Kitchen-sink Model") %>% kable_styling()
+
+cost_benefit_table_2 <-
+   testProbs2 %>%
+      count(predOutcome, Outcome) %>%
+      summarize(True_Negative = sum(n[predOutcome==0 & Outcome==0]),
+                True_Positive = sum(n[predOutcome==1 & Outcome==1]),
+                False_Negative = sum(n[predOutcome==0 & Outcome==1]),
+                False_Positive = sum(n[predOutcome==1 & Outcome==0])) %>%
+       gather(Variable, Count) %>%
+       mutate(Revenue =
+               case_when(Variable == "True_Negative"  ~ 0,
+                         Variable == "True_Positive"  ~ ((-2850 + 5000+ 56000) * (Count *                                                             .25)) + 
+                                                        (-2850 * (Count * .75)),
+                         Variable == "False_Negative" ~ 0 * Count,
+                         Variable == "False_Positive" ~ (-2850) * Count)) %>%
+    bind_cols(data.frame(Description = c(
+              "Predicted correctly homeowner would not take the credit, no marketing resources were allocated, and no credit was allocated",
+              "Predicted correctly homeowner would take the credit; allocated the marketing resources, and 25% took the credit",
+              "Predicted that a homeowner would not take the credit but they did",
+              "Predicted incorrectly homeowner would take the credit; allocated marketing resources; no credit allocated"))) 
+
+kable(cost_benefit_table_2,
+       caption = "Table 3. Cost/Benefit Table - Cleaned Model") %>% kable_styling()
+
+```
+
+Table 2 and 3 are the cost/benefit tables for both model. We can see that the revenue created by kitchen sink model is produces less revenue and more cost compared to the cleaned model. This shows that cleaned model that targets better at homeowners can save HCD's allocation resources and create higher housing values. 
+
+## Threshold
+
+Threshold impacts our cost and benefit analysis. We set a threshold of 50% at the beginning, assuming people with certain conditions will take the credit while others don't. In reality this is not the case. The lower the threshold, means the more flexible the conditions, and the more will be predicted to be "on credit" than "off credit". This section finds the most optimum threshold that will give the greatest return. 
+
+```{r iterate_threshold, include = FALSE}
+iterateThresholds <- function(data) {
+  x = .01
+  all_prediction <- data.frame()
+  while (x <= 1) {
+  
+  this_prediction <-
+      testProbs %>%
+      mutate(predOutcome = ifelse(Probs > x, 1, 0)) %>%
+      count(predOutcome, Outcome) %>%
+      summarize(True_Negative = sum(n[predOutcome==0 & Outcome==0]),
+                True_Positive = sum(n[predOutcome==1 & Outcome==1]),
+                False_Negative = sum(n[predOutcome==0 & Outcome==1]),
+                False_Positive = sum(n[predOutcome==1 & Outcome==0])) %>%
+     gather(Variable, Count) %>%
+     mutate(Revenue =
+               ifelse(Variable == "True_Negative", Count * 0,
+               ifelse(Variable == "True_Positive",((5000+56000-2850) * Count),
+               ifelse(Variable == "False_Negative", (0) * Count,
+               ifelse(Variable == "False_Positive", (-2850) * Count, 0)))),
+            Threshold = x)
+  
+  all_prediction <- rbind(all_prediction, this_prediction)
+  x <- x + .01
+  }
+return(all_prediction)
+}
+```
+
+```{r Threshold}
+
+whichThreshold <- iterateThresholds(testProbs)
+
+whichThreshold_revenue <- 
+whichThreshold %>% 
+    group_by(Threshold) %>% 
+    summarize(Revenue = sum(Revenue))
+
+
+whichThreshold2 <- iterateThresholds(testProbs2)
+
+whichThreshold_revenue2 <- 
+whichThreshold2 %>% 
+    group_by(Threshold) %>% 
+    summarize(Revenue = sum(Revenue))
+     
+```
+
+```{r Revenue, results=TRUE}
+threshold_2 <- 
+whichThreshold %>%
+  ggplot(.,aes(Threshold, Revenue, colour = Variable)) +
+  geom_point() +
+  scale_colour_manual(values = palette5[c(5, 1:3)]) +    
+  labs(title = "Revenue by confusion matrix type and threshold",
+       y = "Revenue") +
+  plotTheme() +
+  guides(colour=guide_legend(title = "Confusion Matrix")) 
+
+threshold_1 <- 
+whichThreshold2 %>%
+  ggplot(.,aes(Threshold, Revenue, colour = Variable)) +
+  geom_point() +
+  scale_colour_manual(values = palette5[c(5, 1:3)]) +    
+  labs(title = "Revenue by confusion matrix type and threshold",
+       y = "Revenue") +
+  plotTheme() +
+  guides(colour=guide_legend(title = "Confusion Matrix")) 
+
+grid.arrange(threshold_1, threshold_2, nrow = 2, bottom = "Fig 7")
+
+whichThreshold_revenue <- 
+  whichThreshold %>% 
+    mutate(Total_Count_of_Credits = ifelse(Variable == "True_Positive", (Count * .25),
+                         ifelse(Variable == "False_Negative", Count, 0))) %>% 
+    group_by(Threshold) %>% 
+    summarize(Revenue = sum(Revenue),
+              Actual_Credit_Rate = sum(Total_Count_of_Credits) / sum(Count),
+              Total_Count_of_Credits = sum(Total_Count_of_Credits),
+              Actual_Credit_Revenue_Loss =  sum(Total_Count_of_Credits * 2850),
+              Revenue_Next_Period = Revenue - Actual_Credit_Revenue_Loss) 
+
+
+whichThreshold_revenue2 <- 
+  whichThreshold %>% 
+    mutate(Total_Count_of_Credits = ifelse(Variable == "True_Positive", (Count * .25),
+                         ifelse(Variable == "False_Negative", Count, 0))) %>% 
+    group_by(Threshold) %>% 
+    summarize(Revenue = sum(Revenue),
+              Actual_Credit_Rate = sum(Total_Count_of_Credits) / sum(Count),
+              Total_Count_of_Credits = sum(Total_Count_of_Credits),
+              Actual_Credit_Revenue_Loss =  sum(Total_Count_of_Credits * 2850),
+              Revenue_Next_Period = Revenue - Actual_Credit_Revenue_Loss) 
+
+```
+
+Fig 7. plots the revenues generated by their confusion matrix. The actual revenue is calculated by the difference between the pink and the purple line. It is hard to see from this plot what is our optimum threshold. 
+
+```{r}
+Optimum_threshold_1 <- 
+ ggplot(whichThreshold_revenue)+
+  geom_line(aes(x = Threshold, y = Revenue))+
+  geom_vline(xintercept =  pull(arrange(whichThreshold_revenue, -Revenue)[1,1]))+
+    labs(title = "Model Revenues By Threshold For Test Sample",
+         subtitle = "Vertical Line Denotes Optimal Threshold; Kitchen-sink Model")
+
+Optimum_threshold_2 <- 
+ ggplot(whichThreshold_revenue2)+
+  geom_line(aes(x = Threshold, y = Revenue))+
+  geom_vline(xintercept =  pull(arrange(whichThreshold_revenue, -Revenue)[1,1]))+
+    labs(title = "Model Revenues By Threshold For Test Sample",
+         subtitle = "Vertical Line Denotes Optimal Threshold; Cleaned Model")
+
+grid.arrange(Optimum_threshold_1,Optimum_threshold_2, bottom = "Fig 8")
+
+```
+
+The line in fig 8. shows the threshold with respect to the optimum revenue. Two models have relatively similar optimum thresholds around 6% that generates. A lower threshold means HCD should reach out to more people despite the fact that more will turn down the offer -- because this would give us the best benefit at end according to the analysis.  
+
+```{r Treshold as a funcion of Revenue and Counts}
+credits_threshold_1 <- 
+ ggplot(whichThreshold_revenue)+
+  geom_line(aes(x = Threshold, y = Total_Count_of_Credits))+
+    labs(title = "Threshold as a Function of Total Credit Counts",
+         subtitle = "Kitchen-sink Model")
+
+credits_threshold_2 <- 
+ ggplot(whichThreshold_revenue2)+
+  geom_line(aes(x = Threshold, y = Total_Count_of_Credits))+
+    labs(title = "Threshold as a Function of Total Credit Counts",
+         subtitle = "Cleaned Model")
+
+reveune_threshold_1 <-  
+  ggplot(whichThreshold_revenue)+
+  geom_line(aes(x = Threshold, y = Revenue))+
+    labs(title = "Threshold as a Function of Total Reveune",
+         subtitle = "Kitchensink Model")
+
+reveune_threshold_2 <-  
+  ggplot(whichThreshold_revenue2)+
+  geom_line(aes(x = Threshold, y = Revenue))+
+    labs(title = "Threshold as a Function of Total Reveune",
+         subtitle = "Cleaned Model")
+
+grid.arrange(credits_threshold_1, credits_threshold_2, reveune_threshold_1, reveune_threshold_2, ncol=2, bottom = "Fig 9") 
+```
+
+Fig 9. denotes the relationship between credit count, revenue and threshold. Both models depict same trends. 
+
+The first row of plots shows that, as the threshold gets higher, the capture rate for homeowners get slower, indicated by the flattened lines for both models. Initially, both model can capture 60 homeowners willing to take the credits at around 6% threshold. To capture 60 more homeowners, coming to 120, the HCD needs to set a threshold of around 50%. This means both models are most efficient at capturing homeowners who take the credit at a lower threshold.
+
+The second row of plots demonstrate that revenue increases initially as the threshold grows and deteriorates very rapidly afterwards. As mentioned before, a threshold of 6% gives the greatest return. 
+
+```{r Table Showing Revenue and Credit Count against Threshold, results = 'asis'}
+whichThreshold_revenue2.T <-
+  whichThreshold_revenue2 %>%
+  rename("Total_Revenue" = Revenue) %>%
+  filter(Threshold == "0.5" | Threshold == "0.06")%>%
+  mutate(Model = case_when(Threshold == "0.5" ~ "50% Threshold", Threshold == "0.06" ~ "Optimal Threshold"))%>%
+  select(Model, Total_Revenue, Total_Count_of_Credits)
+
+kable(whichThreshold_revenue2.T, caption= "Table 4. Camparison between revenue and total count at different thresholds") %>% kable_styling()
+```
+
+Table 4 shows the revenue and total accounts against the optimum and 50% threshold for cleaned model. We see that by setting an optimum threshold (6%), HCD can generate $3,000,000 in housing values. 
+
+After the model is adjusted to 6% of threshold, the model will predict more homeowners who are willing to take the credit and therefore more people to be reached out. Note that this benefit/cost analysis is from purely judging based on revenue return. For each homeowner who take the credit, HCD has to provide the subsidy, and therefore gives out money. This model pretends that this is a loss on government's side, while in fact, besides using limited allocation resource to its best capability, HCD also wants more eligible homeowners to take the credit. This sometimes would result a loss in "revenue", and shows up as undesirable according to the model. 
+
+# Conclusion
+
+In short, the analysis does not recommend this model to be put into production. The focus here is to improve the model's sensitivity--to correctly predict a homeowner to take the credit, and distribute the allocation resources accordingly. Yet, even if the model has been re-engineered with new features to improve its significance, sensitivity still tends to be very low (21% before feature engineering and 23% after). This is an understandable result, because the base data given has much higher number of "no" than "yes" of peple who signed up in the previous campaign. This fact makes the model's specificity -- the ability to detect false as false -- very high, but contributes little to sensitivity.
+
+Therefore, more character data on homeowners who actually signed up during prior campaign to improve the sensitivity. 
+
+The cost/benefit analysis shows that our model will generate around $5,000,000 housing value when targeted better at homeowners who will likely to take the credit. This is a decent number, but the goal for HCD is not to generate the greatest housing value, but encouraging more homeowners to take the credit, so this analysis is less helpful here. 
+
+Nevertheless, the information about improved housing sale price and higher housing value could be addressed in the marketing material. The benefits of the program seem to be more direct on homeowners who potentially want to sell their homes. One recommendation is for HCD to target at homeowners who would like to sell their homes in the near future, such as private real estate developer or homeowners who have posted their listing online. 
